@@ -64,13 +64,14 @@ namespace
     // "capabilities" array on /api/show.
     // Returns true when the answer was conclusive.
     bool ProbeViaShow(OllamaHttpClient& http, const std::string& base,
-                      const std::string& model, bool& outSupported,
-                      std::string& outDetail)
+                      const std::string& model, const std::string& apiKey,
+                      bool& outSupported, std::string& outDetail)
     {
         nlohmann::json body = { { "model", model } };
 
         OllamaHttpResult r = http.PostEx(base + "/api/show", body.dump(),
-                                         static_cast<int>(g_CapabilityProbeTimeoutSeconds));
+                                         static_cast<int>(g_CapabilityProbeTimeoutSeconds),
+                                         apiKey);
 
         if (!r.ok())
         {
@@ -110,8 +111,8 @@ namespace
     // Step 2 (older Ollama, or an inconclusive /api/show): actually ask for a
     // one-token thinking generation and see whether it is refused.
     bool ProbeViaGenerate(OllamaHttpClient& http, const std::string& base,
-                          const std::string& model, bool& outSupported,
-                          std::string& outDetail)
+                          const std::string& model, const std::string& apiKey,
+                          bool& outSupported, std::string& outDetail)
     {
         nlohmann::json body = {
             { "model",  model },
@@ -122,7 +123,8 @@ namespace
         };
 
         OllamaHttpResult r = http.PostEx(base + "/api/generate", body.dump(),
-                                         static_cast<int>(g_CapabilityProbeTimeoutSeconds));
+                                         static_cast<int>(g_CapabilityProbeTimeoutSeconds),
+                                         apiKey);
 
         if (r.ok())
         {
@@ -144,18 +146,18 @@ namespace
         return false;
     }
 
-    void RunProbe(std::string base, std::string model)
+    void RunProbe(std::string base, std::string model, std::string apiKey)
     {
         OllamaHttpClient http;
 
         bool supported = false;
         std::string detail;
 
-        bool conclusive = ProbeViaShow(http, base, model, supported, detail);
+        bool conclusive = ProbeViaShow(http, base, model, apiKey, supported, detail);
         if (!conclusive)
         {
             std::string showDetail = detail;
-            conclusive = ProbeViaGenerate(http, base, model, supported, detail);
+            conclusive = ProbeViaGenerate(http, base, model, apiKey, supported, detail);
             if (!conclusive && !showDetail.empty())
                 detail = showDetail + "; " + detail;
         }
@@ -180,6 +182,24 @@ namespace
         std::lock_guard<std::mutex> lock(g_mutex);
         g_probeRunning = false;
     }
+    // Detail string set when the openai format skips probing; also the
+    // idempotence marker for that skip.
+    const char* const OPENAI_SKIP_DETAIL = "OpenAI-compatible endpoint: probe skipped";
+
+    // Everything learned about the current model at runtime. Reset on every
+    // probe restart and on the openai-format skip.
+    void ResetLearnedState()
+    {
+        g_latencyDisabled.store(false);
+        g_rejectionLogged.store(false);
+        g_reasonsUnconditionally.store(false);
+        g_effortLevelsRejected.store(false);
+        {
+            std::lock_guard<std::mutex> lock(g_latencyMutex);
+            g_thinkSamples    = 0;
+            g_thinkLatencySum = 0;
+        }
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -188,6 +208,40 @@ void OllamaCapability_Init(bool force)
 {
     const std::string base  = OllamaDeriveBaseUrl(g_OllamaUrl);
     const std::string model = g_OllamaModel;
+
+    // OpenAI-compatible endpoints have no /api/show to ask and no think field
+    // to negotiate, so no probe traffic leaves the box. Before the
+    // g_probeRunning guard on purpose: a probe left over from an earlier
+    // format must not sneak past this. A stale in-flight probe may still
+    // overwrite the skip state afterwards -- accepted, with the full picture:
+    // RunProbe has three outcomes, and the Supported one can overwrite this
+    // skip, re-enabling think in openai mode (every request that asks for
+    // reasoning then carries ReasoningTokenReserve, 512 by default, on top of
+    // max_tokens) until the next reload or restart. The skip also clears
+    // g_probeRunning while a probe is live, so flipping back to ollama before
+    // it exits can run two probes at once. Both sit inside the narrow
+    // reload-during-probe window, all shared state is behind g_mutex, and no
+    // path here can crash -- self-corrects on the next reload.
+    if (g_OpenAiFormat)
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+
+            if (!force && base == g_probedUrl && model == g_probedModel &&
+                g_support == OllamaThinkSupport::Unsupported &&
+                g_probeDetail == OPENAI_SKIP_DETAIL)
+                return;   // already skipped for this endpoint+model
+
+            g_probedUrl    = base;
+            g_probedModel  = model;
+            g_support      = OllamaThinkSupport::Unsupported;
+            g_probeDetail  = OPENAI_SKIP_DETAIL;
+            g_probeRunning = false;
+        }
+
+        ResetLearnedState();
+        return;
+    }
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -208,18 +262,12 @@ void OllamaCapability_Init(bool force)
         g_probeRunning = true;
     }
 
-    g_latencyDisabled.store(false);
-    g_rejectionLogged.store(false);
-    g_reasonsUnconditionally.store(false);
-    g_effortLevelsRejected.store(false);
-    {
-        std::lock_guard<std::mutex> lock(g_latencyMutex);
-        g_thinkSamples    = 0;
-        g_thinkLatencySum = 0;
-    }
+    ResetLearnedState();
 
-    // Off the world thread: a missing Ollama must not stall startup.
-    std::thread(RunProbe, base, model).detach();
+    // Off the world thread: a missing Ollama must not stall startup. The key
+    // is copied here, on the world thread -- the probe thread never touches
+    // the global.
+    std::thread(RunProbe, base, model, std::string(g_ApiKey)).detach();
 }
 
 OllamaThinkSupport OllamaCapability_GetSupport()

@@ -55,6 +55,13 @@ extern std::string g_OllamaStop;
 extern std::string g_OllamaSystemPrompt;
 extern std::string g_OllamaSeed;
 
+// OpenAI-compatible endpoint support (conf OllamaChat.ApiFormat / ApiKey).
+// g_ApiKey is snapshot-only after load: workers read it from
+// OllamaEndpointSettings, never from this global (`.ollama reload` reassigns
+// it on the world thread). The bool is POD, a benign racy read.
+extern bool        g_OpenAiFormat;
+extern std::string g_ApiKey;
+
 // Optional sampling controls for response diversity. All default to "unset",
 // in which case the field is not sent at all and the model's default applies.
 extern int32_t     g_OllamaTopK;              // -1 = unset

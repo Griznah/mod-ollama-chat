@@ -21,17 +21,17 @@ public:
     OllamaHttpClient();
     ~OllamaHttpClient();
 
-    // Backwards-compatible form: body on 200, empty string otherwise.
-    std::string Post(const std::string& url, const std::string& jsonData);
-
     // Preferred form. Connections are pooled per worker thread, so repeated
     // calls reuse a keep-alive socket without serialising concurrent workers
     // behind a single shared client.
     // timeoutOverride > 0 uses that instead of the configured timeout; the
     // capability probe wants to fail fast rather than hang startup diagnostics.
+    // apiKey non-empty adds "Authorization: Bearer <key>" to the request.
     OllamaHttpResult PostEx(const std::string& url, const std::string& jsonData,
-                            int timeoutOverride = 0);
-    OllamaHttpResult GetEx(const std::string& url, int timeoutOverride = 0);
+                            int timeoutOverride = 0,
+                            const std::string& apiKey = "");
+    OllamaHttpResult GetEx(const std::string& url, int timeoutOverride = 0,
+                           const std::string& apiKey = "");
 
     void SetTimeout(int seconds);
     bool IsAvailable() const;

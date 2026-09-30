@@ -49,13 +49,18 @@ namespace
         return out;
     }
 
-    httplib::Headers BuildHeaders(const std::string& host)
+    httplib::Headers BuildHeaders(const std::string& host, const std::string& apiKey)
     {
         httplib::Headers headers = {
             { "Content-Type", "application/json" },
             { "User-Agent",   "AzerothCore-OllamaChat/2.0" },
             { "Accept",       "application/json" },
         };
+
+        // Added here rather than via the client's bearer-token auth so plain
+        // and SSL clients behave identically. Ollama ignores the header.
+        if (!apiKey.empty())
+            headers.emplace("Authorization", "Bearer " + apiKey);
 
         if (host.find("ngrok") != std::string::npos)
             headers.emplace("ngrok-skip-browser-warning", "true");
@@ -108,7 +113,8 @@ namespace
     }
 
     OllamaHttpResult Perform(const ParsedUrl& u, int timeout,
-                             const std::string& jsonData, bool isPost)
+                             const std::string& jsonData, bool isPost,
+                             const std::string& apiKey)
     {
         OllamaHttpResult result;
         const std::string key = u.host + ":" + std::to_string(u.port);
@@ -116,7 +122,7 @@ namespace
         InvalidateIfTimeoutChanged(timeout);
 
         httplib::Result response(nullptr, httplib::Error::Unknown);
-        const httplib::Headers headers = BuildHeaders(u.host);
+        const httplib::Headers headers = BuildHeaders(u.host, apiKey);
 
         if (u.https)
         {
@@ -208,7 +214,7 @@ bool OllamaHttpClient::IsAvailable() const
 }
 
 OllamaHttpResult OllamaHttpClient::PostEx(const std::string& url, const std::string& jsonData,
-                                          int timeoutOverride)
+                                          int timeoutOverride, const std::string& apiKey)
 {
     OllamaHttpResult result;
 
@@ -231,7 +237,7 @@ OllamaHttpResult OllamaHttpClient::PostEx(const std::string& url, const std::str
         if (g_DebugEnabled)
             LOG_INFO("module.ollamachat", "[Ollama Chat] POST {}:{}{}", u.host, u.port, u.path);
 
-        result = Perform(u, timeout, jsonData, true);
+        result = Perform(u, timeout, jsonData, true, apiKey);
 
         if (!result.error.empty())
             LOG_ERROR("module.ollamachat", "[Ollama Chat] HTTP POST to {}:{}{} failed: {}",
@@ -249,7 +255,8 @@ OllamaHttpResult OllamaHttpClient::PostEx(const std::string& url, const std::str
     return result;
 }
 
-OllamaHttpResult OllamaHttpClient::GetEx(const std::string& url, int timeoutOverride)
+OllamaHttpResult OllamaHttpClient::GetEx(const std::string& url, int timeoutOverride,
+                                         const std::string& apiKey)
 {
     OllamaHttpResult result;
 
@@ -268,7 +275,7 @@ OllamaHttpResult OllamaHttpClient::GetEx(const std::string& url, int timeoutOver
                                        ? static_cast<int>(g_HttpTimeoutSeconds)
                                        : m_timeout);
 
-        result = Perform(u, timeout, std::string(), false);
+        result = Perform(u, timeout, std::string(), false, apiKey);
     }
     catch (const std::exception& e)
     {
@@ -276,10 +283,4 @@ OllamaHttpResult OllamaHttpClient::GetEx(const std::string& url, int timeoutOver
     }
 
     return result;
-}
-
-std::string OllamaHttpClient::Post(const std::string& url, const std::string& jsonData)
-{
-    OllamaHttpResult r = PostEx(url, jsonData);
-    return r.ok() ? r.body : std::string();
 }

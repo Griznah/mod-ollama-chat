@@ -469,9 +469,11 @@ bool OllamaChatConfigCommand::HandleOllamaStatusCommand(ChatHandler* handler)
     const GovernorStats       gov      = Governor_GetStats();
 
     handler->PSendSysMessage("|cff00ff00[Ollama Chat] Status|r");
-    handler->PSendSysMessage("Module: {}   Endpoint: {}   Model: {}",
+    handler->PSendSysMessage("Module: {}   Endpoint: {}   Model: {}   Format: {}   Key: {}",
                              g_Enable ? "enabled" : "DISABLED",
-                             g_OllamaUrl, g_OllamaModel);
+                             g_OllamaUrl, g_OllamaModel,
+                             g_OpenAiFormat ? "openai" : "ollama",
+                             g_ApiKey.empty() ? "none" : "set");
     handler->PSendSysMessage("Think: {}", OllamaCapability_StatusText());
 
     handler->PSendSysMessage("Dispatcher: {} workers, {} queued, {} in flight, {} awaiting delivery",

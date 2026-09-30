@@ -42,6 +42,11 @@ struct OllamaEndpointSettings
     std::string stop;
     std::string seed;
 
+    // OpenAI-compatible endpoint support. apiKey rides the snapshot per the
+    // same rule as every other string above: workers never touch the global.
+    std::string apiKey;
+    bool        openAiFormat = false;
+
     uint32_t numPredict = 0;
     uint32_t numCtx     = 0;
     uint32_t numThreads = 0;
