@@ -13,6 +13,7 @@
 #include "mod-ollama-chat_topics.h"
 #include "mod-ollama-chat-utilities.h"
 #include <fmt/core.h>
+#include <cctype>
 #include <sstream>
 #include <fstream>
 
@@ -59,6 +60,11 @@ uint32_t    g_OllamaNumThreads = 0;
 std::string g_OllamaStop = "";
 std::string g_OllamaSystemPrompt = "";
 std::string g_OllamaSeed = "";
+
+// OpenAI-compatible endpoint support. The key is snapshot-only: workers take
+// it from OllamaEndpointSettings, never from this global (see api.h).
+std::string g_ApiKey       = "";
+bool        g_OpenAiFormat = false;
 int32_t     g_OllamaTopK             = -1;
 float       g_OllamaMinP             = -1.0f;
 float       g_OllamaPresencePenalty  = -1000.0f;
@@ -525,6 +531,25 @@ void LoadOllamaChatConfig()
     g_OllamaStop                      = sConfigMgr->GetOption<std::string>("OllamaChat.Stop", "");
     g_OllamaSystemPrompt              = sConfigMgr->GetOption<std::string>("OllamaChat.SystemPrompt", "");
     g_OllamaSeed                      = sConfigMgr->GetOption<std::string>("OllamaChat.Seed", "");
+
+    g_ApiKey = sConfigMgr->GetOption<std::string>("OllamaChat.ApiKey", "");
+    {
+        std::string apiFormat = sConfigMgr->GetOption<std::string>("OllamaChat.ApiFormat", "ollama");
+        for (char& c : apiFormat)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+        if (apiFormat == "openai")
+            g_OpenAiFormat = true;
+        else if (apiFormat == "ollama")
+            g_OpenAiFormat = false;
+        else
+        {
+            g_OpenAiFormat = false;
+            LOG_WARN("module.ollamachat",
+                     "[Ollama Chat] Unrecognised OllamaChat.ApiFormat '{}'; using ollama.",
+                     apiFormat);
+        }
+    }
 
     g_MaxConcurrentQueries            = sConfigMgr->GetOption<uint32_t>("OllamaChat.MaxConcurrentQueries", 0);
 
@@ -1044,7 +1069,7 @@ void LoadOllamaChatConfig()
     LOG_INFO("server.loading",
              "[Ollama Chat] Config loaded: Enabled = {}, SayDistance = {}, YellDistance = {}, "
              "Reply Chances - Say: P{}%/B{}%, Channel: P{}%/B{}%, Party: P{}%/B{}%, Guild: P{}%/B{}%, MaxBotsToPick = {}, "
-             "Url = {}, Model = {}, MaxConcurrentQueries = {}, EnableRandomChatter = {}, MinRandInt = {}, MaxRandInt = {}, RandomChatterRealPlayerDistance = {}, "
+             "Url = {}, Model = {}, Format = {}, ApiKey = {}, MaxConcurrentQueries = {}, EnableRandomChatter = {}, MinRandInt = {}, MaxRandInt = {}, RandomChatterRealPlayerDistance = {}, "
              "RandomChatterBotCommentChance = {}. MaxConcurrentQueries = {}. Extra blacklist commands: {}",
              g_Enable, g_SayDistance, g_YellDistance,
              g_PlayerReplyChance_Say, g_BotReplyChance_Say,
@@ -1052,7 +1077,10 @@ void LoadOllamaChatConfig()
              g_PlayerReplyChance_Party, g_BotReplyChance_Party,
              g_PlayerReplyChance_Guild, g_BotReplyChance_Guild,
              g_MaxBotsToPick,
-             g_OllamaUrl, g_OllamaModel, g_MaxConcurrentQueries,
+             g_OllamaUrl, g_OllamaModel,
+             g_OpenAiFormat ? "openai" : "ollama",
+             g_ApiKey.empty() ? "none" : "set",
+             g_MaxConcurrentQueries,
              g_EnableRandomChatter, g_MinRandomInterval, g_MaxRandomInterval, g_RandomChatterRealPlayerDistance,
              g_RandomChatterBotCommentChance, g_MaxConcurrentQueries, extraBlacklist);
 }

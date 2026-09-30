@@ -38,6 +38,43 @@ OllamaChat.DebugShowFullPrompt = 0
 #     Default:     http://localhost:11434/api/generate
 OllamaChat.Url = http://localhost:11434/api/generate
 
+# OllamaChat.ApiFormat
+#     Description: Wire format of the LLM endpoint.
+#                  "ollama" (default) - the native /api/generate protocol.
+#                  "openai" - the OpenAI Chat Completions protocol. Point
+#                  OllamaChat.Url at a chat/completions endpoint of any
+#                  OpenAI-compatible provider, e.g.
+#                      https://api.openai.com/v1/chat/completions
+#                  Works with OpenAI, OpenRouter, Groq, vLLM, LM Studio and
+#                  similar gateways.
+#
+#                  In openai format the module sends {model, messages,
+#                  stream, max_tokens, ...} instead of Ollama's {model,
+#                  prompt, options, think}. The think/reasoning negotiation
+#                  is Ollama-only: openai requests carry no reasoning
+#                  control and the provider's default applies. Reasoning
+#                  text that still comes back is parsed and logged.
+#
+#                  Pair this setting with the Url: an openai format against
+#                  an Ollama URL (or vice versa) fails on the first request
+#                  with an HTTP error in the log.
+#     Default:     ollama
+OllamaChat.ApiFormat = ollama
+
+# OllamaChat.ApiKey
+#     Description: API key sent as "Authorization: Bearer <key>" on every
+#                  HTTP request the module makes to the LLM endpoint
+#                  (generation and capability probes alike), in both
+#                  formats. Empty = no Authorization header; a local Ollama
+#                  ignores the header, so it is safe to set always.
+#
+#                  KEEP THIS FILE PRIVATE. The key is stored in plain text
+#                  (the same trust model as the database password in
+#                  worldserver.conf). The module never logs or displays it;
+#                  ".ollama status" shows only "set"/"none".
+#     Default:     "" (no auth header sent)
+OllamaChat.ApiKey = ""
+
 # OllamaChat.Model
 #     Description: The model identifier to be used in the Ollama API request.
 #     Default:     llama3.2:1b
@@ -46,7 +83,10 @@ OllamaChat.Model = llama3.2:1b
 # OllamaChat.NumPredict
 #     Description: Maximum number of tokens to generate in Ollama responses.
 #     0 = unlimited. Only set if you want a hard cap.
-#     Default: 100
+#     Default: 40
+#
+#     NOTE for ApiFormat = openai: NumPredict maps to max_tokens. The default
+#     of 40 truncates cloud-model replies; 150-250 works better there.
 #
 #     IMPORTANT: this cap covers reasoning AND the reply. On a reasoning model
 #     (gpt-oss, deepseek-r1, qwen3 thinking builds) the reasoning is emitted
@@ -61,8 +101,8 @@ OllamaChat.Model = llama3.2:1b
 #     |     40     |   ~27–30      | Standard WoW reply (recommended) |
 #     |     50     |   ~35–38      | Slightly longer reply            |
 #     |     75     |   ~50–60      | Long quest/lore text             |
-#     |    100+    |   70–80+      | Multi-paragraph (not typical)    |
-OllamaChat.NumPredict = 100
+#     |    100+    |   70-80+      | Multi-paragraph (not typical)    |
+OllamaChat.NumPredict = 40
 
 # OllamaChat.ReasoningTokenReserve
 #     Description: Extra num_predict headroom added when reasoning tokens are
@@ -85,6 +125,8 @@ OllamaChat.ReasoningTokenReserve = 512
 #                  Lower values (e.g., 0.2) = more focused, repetitive, and predictable.
 #                  Higher values (e.g., 1.0) = more random, creative, or surprising.
 #                  0.8 is the Ollama default.
+#                  ApiFormat = openai: a value left at the 0.8 default is NOT
+#                  sent; the provider's own default applies instead.
 #     Example:     OllamaChat.Temperature = 0.6
 #     Default:     0.8
 OllamaChat.Temperature = 0.8
@@ -94,6 +136,8 @@ OllamaChat.Temperature = 0.8
 #                  Lower values (e.g., 0.5) = more conservative.
 #                  Higher values (up to 1.0) = more open.
 #                  0.95 is the Ollama default.
+#                  ApiFormat = openai: a value left at the 0.95 default is NOT
+#                  sent; the provider's own default applies instead.
 #     Example:     OllamaChat.TopP = 0.9
 #     Default:     0.95
 OllamaChat.TopP = 0.95

@@ -30,6 +30,9 @@
 - **Ollama LLM Integration:**  
   Bots generate chat responses by querying an external Ollama API endpoint. This enables natural and contextually appropriate in-game dialogue.
 
+- **OpenAI-Compatible Endpoints:**  
+  Don't want to run a local model? Point the module at any OpenAI-compatible API — OpenAI, OpenRouter, Groq, vLLM, LM Studio — with `OllamaChat.ApiFormat = openai` and `OllamaChat.ApiKey`. See [Using an OpenAI-Compatible Endpoint](#using-an-openai-compatible-endpoint) below.
+
 - **Player Bot Personalities:**  
   When enabled, each bot is assigned a personality type (e.g., Gamer, Roleplayer, Trickster) that modifies its chat style. Personalities influence prompt generation and result in varied, immersive responses.
 
@@ -161,7 +164,7 @@ export OLLAMA_HOST=0.0.0.0
 ollama serve
 ```
 
-This binds the server to all network interfaces, allowing connections from other machines on your network. Update the `OllamaChat.ApiEndpoint` in `mod-ollama-chat.conf` to use the IP address of the machine running Ollama (e.g., `http://192.168.1.100:11434`).
+This binds the server to all network interfaces, allowing connections from other machines on your network. Update the `OllamaChat.Url` in `mod-ollama-chat.conf` to use the IP address of the machine running Ollama (e.g., `http://192.168.1.100:11434/api/generate`).
 
 > [!WARNING]
 > Exposing Ollama to the network may pose security risks. Ensure your firewall allows traffic on port 11434 only from trusted networks, and consider additional security measures if exposing to the internet.
@@ -178,7 +181,7 @@ You can find available models at [ollama.com/library](https://ollama.com/library
 
 ### Connecting the Module
 
-The module connects to the Ollama API via the configuration in `mod-ollama-chat.conf`. The default endpoint is `http://localhost:11434`. If your Ollama server is running on a different host or port, update the `OllamaChat.ApiEndpoint` setting.
+The module connects to the Ollama API via the configuration in `mod-ollama-chat.conf`. The default endpoint is `http://localhost:11434/api/generate`. If your Ollama server is running on a different host or port, update the `OllamaChat.Url` setting.
 
 ### Checking if Ollama is Running
 
@@ -189,6 +192,49 @@ curl http://localhost:11434/api/tags
 ```
 
 This should return a JSON response listing available models. If you get a connection error, ensure the server is started and the endpoint is correct.
+
+## Using an OpenAI-Compatible Endpoint
+
+Instead of a local Ollama, the module can talk to any OpenAI-compatible
+Chat Completions API — OpenAI, OpenRouter, Groq, vLLM, LM Studio, LiteLLM and
+similar gateways. Set three things in `mod-ollama-chat.conf`:
+
+```
+OllamaChat.ApiFormat = openai
+OllamaChat.Url       = https://api.openai.com/v1/chat/completions
+OllamaChat.ApiKey    = sk-...
+OllamaChat.Model     = gpt-4o-mini
+```
+
+- **`ApiKey`** is sent as an `Authorization: Bearer <key>` header on every
+  request the module makes, in both formats. It is never logged or shown in
+  game — `.ollama status` prints only `Key: set`/`Key: none`. The key sits in
+  the config file in plain text (same trust model as your DB password), so
+  keep `mod_ollama_chat.conf` private.
+- **`NumPredict` maps to `max_tokens`** in this mode. The default of 40 is
+  tuned for tiny local models and truncates cloud-model replies — use
+  150-250 instead.
+- **Think-mode negotiation is Ollama-only.** OpenAI requests carry no
+  reasoning control; the provider's default applies. The capability probe is
+  skipped entirely, so `.ollama status` reports think as unsupported with
+  `OpenAI-compatible endpoint: probe skipped` — that is expected, not an
+  error. Reasoning text some models still return is parsed and kept out of
+  the spoken reply.
+- **Sampling:** `Temperature`/`TopP` left at their defaults are *not sent* in
+  openai mode, so the provider's own defaults apply. `Stop` is capped at 4
+  sequences (an OpenAI API limit); extras are dropped with a warning.
+- Pair the format with the URL: `openai` format against an Ollama URL (or
+  vice versa) fails on the first request with an HTTP error in the log.
+
+Everything else — personalities, memory, governor, event chatter — works the
+same in both formats. Settings reload live with `.ollama reload`. Verify a
+cloud endpoint with `.ollama test hello`; the result appears in the server
+log (`module.ollamachat`), not in game — a wrong key shows up there as
+`HTTP 401: <provider response body>` (the raw body is kept; the provider's
+own `error.message` is only extracted from HTTP 200 responses). Dispatched
+bot requests record the same error text and surface it as the `Last error:`
+line in `.ollama status`; that line tracks dispatched requests only, so a
+failing `.ollama test` never appears there.
 
 ## Configuration Options
 

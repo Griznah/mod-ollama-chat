@@ -20,11 +20,101 @@ namespace
     std::mutex             g_settingsMutex;
     OllamaEndpointSettings g_settings;
 
+    // Comma-separated stop sequences -> trimmed vector. Shared by both wire
+    // formats so trimming behavior cannot drift between them.
+    std::vector<std::string> SplitStopSequences(const std::string& stop)
+    {
+        std::vector<std::string> stopSeqs;
+        std::stringstream ss(stop);
+        std::string item;
+        while (std::getline(ss, item, ','))
+        {
+            const size_t start = item.find_first_not_of(" \t");
+            const size_t end   = item.find_last_not_of(" \t");
+            if (start != std::string::npos && end != std::string::npos)
+                stopSeqs.push_back(item.substr(start, end - start + 1));
+        }
+        return stopSeqs;
+    }
+
+    // OpenAI Chat Completions body (ApiFormat = openai). Ollama-only options
+    // (num_ctx, num_thread, repeat_penalty, top_k, min_p, think) are never
+    // emitted; strict providers reject unknown fields.
+    nlohmann::json BuildOpenAIRequest(const OllamaEndpointSettings& cfg,
+                                      const std::string& prompt,
+                                      uint32_t reasoningReserve)
+    {
+        nlohmann::json messages = nlohmann::json::array();
+        if (!cfg.systemPrompt.empty())
+            messages.push_back({ { "role", "system" },
+                                 { "content", SanitizeUTF8(cfg.systemPrompt) } });
+        messages.push_back({ { "role", "user" },
+                             { "content", SanitizeUTF8(prompt) } });
+
+        nlohmann::json request = {
+            { "model",    cfg.model },
+            { "messages", messages },
+            { "stream",   false },
+        };
+
+        // Same budget semantics as the ollama branch: the cap covers
+        // reasoning and answer together.
+        if (cfg.numPredict > 0)
+            request["max_tokens"] = cfg.numPredict + reasoningReserve;
+
+        // Same omission test as the ollama branch. An unset temperature or
+        // top_p is NOT sent, so the provider's own default applies -- that is
+        // deliberate, not a bug.
+        if (cfg.temperature != 0.8f)          request["temperature"] = cfg.temperature;
+        if (cfg.topP != 0.95f)                request["top_p"] = cfg.topP;
+        if (cfg.presencePenalty > -999.0f)    request["presence_penalty"] = cfg.presencePenalty;
+        if (cfg.frequencyPenalty > -999.0f)   request["frequency_penalty"] = cfg.frequencyPenalty;
+
+        if (!cfg.seed.empty())
+        {
+            try
+            {
+                request["seed"] = std::stoi(cfg.seed);
+            }
+            catch (const std::exception&)
+            {
+                if (g_DebugEnabled)
+                    LOG_INFO("module.ollamachat", "[Ollama Chat] Invalid seed value: {}", cfg.seed);
+            }
+        }
+
+        if (!cfg.stop.empty())
+        {
+            std::vector<std::string> stopSeqs = SplitStopSequences(cfg.stop);
+
+            // OpenAI rejects more than 4 stop sequences outright.
+            if (stopSeqs.size() > 4)
+            {
+                LOG_WARN("module.ollamachat",
+                         "[Ollama Chat] OpenAI endpoints accept at most 4 stop sequences; "
+                         "dropping {} of {} configured entries.",
+                         stopSeqs.size() - 4, stopSeqs.size());
+                stopSeqs.resize(4);
+            }
+
+            if (!stopSeqs.empty())
+                request["stop"] = stopSeqs;
+        }
+
+        // No reasoning control in this format: "think" is not an OpenAI
+        // param and reasoning_effort is model-dependent, so the provider's
+        // default applies. Reasoning tokens that still arrive are parsed.
+        return request;
+    }
+
     nlohmann::json BuildRequest(const OllamaEndpointSettings& cfg,
                                 const std::string& prompt,
                                 const OllamaThinkRequest& think,
                                 uint32_t reasoningReserve)
     {
+        if (cfg.openAiFormat)
+            return BuildOpenAIRequest(cfg, prompt, reasoningReserve);
+
         nlohmann::json request = {
             { "model",  cfg.model },
             { "prompt", SanitizeUTF8(prompt) },
@@ -76,16 +166,7 @@ namespace
 
         if (!cfg.stop.empty())
         {
-            std::vector<std::string> stopSeqs;
-            std::stringstream ss(cfg.stop);
-            std::string item;
-            while (std::getline(ss, item, ','))
-            {
-                const size_t start = item.find_first_not_of(" \t");
-                const size_t end   = item.find_last_not_of(" \t");
-                if (start != std::string::npos && end != std::string::npos)
-                    stopSeqs.push_back(item.substr(start, end - start + 1));
-            }
+            const std::vector<std::string> stopSeqs = SplitStopSequences(cfg.stop);
             if (!stopSeqs.empty())
                 request["stop"] = stopSeqs;
         }
@@ -159,6 +240,81 @@ namespace
         outThinking = thinking.str();
     }
 
+    // Chat Completions replies are a single JSON object; tolerate a
+    // streaming-shaped (JSONL) body the same way ParseGenerateBody does.
+    void ParseChatCompletionsBody(const std::string& body, std::string& outText,
+                                  std::string& outThinking, std::string& outError)
+    {
+        std::ostringstream text;
+        std::ostringstream thinking;
+        bool parsedAny = false;
+
+        std::stringstream ss(body);
+        std::string line;
+
+        while (std::getline(ss, line))
+        {
+            if (line.empty() || std::all_of(line.begin(), line.end(),
+                                            [](unsigned char c) { return std::isspace(c); }))
+                continue;
+
+            try
+            {
+                nlohmann::json parsed = nlohmann::json::parse(line);
+                parsedAny = true;
+
+                if (parsed.contains("error"))
+                {
+                    const nlohmann::json& err = parsed["error"];
+                    if (err.is_object() && err.contains("message") && err["message"].is_string())
+                    {
+                        outError = err["message"].get<std::string>();
+                        continue;
+                    }
+                    if (err.is_string())
+                    {
+                        outError = err.get<std::string>();
+                        continue;
+                    }
+                }
+
+                if (parsed.contains("choices") && parsed["choices"].is_array())
+                {
+                    for (const auto& choice : parsed["choices"])
+                    {
+                        if (!choice.is_object() || !choice.contains("message"))
+                            continue;
+                        const nlohmann::json& message = choice["message"];
+
+                        if (message.contains("content") && message["content"].is_string())
+                            text << message["content"].get<std::string>();
+
+                        // Reasoning conventions seen in the wild: DeepSeek's
+                        // reasoning_content, OpenRouter's plain reasoning
+                        // string. Other forms just stay empty.
+                        if (message.contains("reasoning_content") &&
+                            message["reasoning_content"].is_string())
+                            thinking << message["reasoning_content"].get<std::string>();
+                        else if (message.contains("reasoning") &&
+                                 message["reasoning"].is_string())
+                            thinking << message["reasoning"].get<std::string>();
+                    }
+                }
+            }
+            catch (const std::exception& e)
+            {
+                if (outError.empty())
+                    outError = std::string("JSON parse failure: ") + e.what();
+            }
+        }
+
+        if (!parsedAny && outError.empty())
+            outError = "no JSON object in response body";
+
+        outText     = text.str();
+        outThinking = thinking.str();
+    }
+
     OllamaApiResult PerformOnce(const OllamaEndpointSettings& cfg,
                                 const std::string& prompt,
                                 const OllamaThinkRequest& think,
@@ -173,7 +329,7 @@ namespace
         const nlohmann::json request = BuildRequest(cfg, prompt, think, reasoningReserve);
 
         const auto started = std::chrono::steady_clock::now();
-        OllamaHttpResult http = t_httpClient.PostEx(cfg.url, request.dump());
+        OllamaHttpResult http = t_httpClient.PostEx(cfg.url, request.dump(), 0, cfg.apiKey);
         const auto finished = std::chrono::steady_clock::now();
 
         result.latencyMs = static_cast<uint64_t>(
@@ -196,7 +352,10 @@ namespace
         }
 
         std::string parseError;
-        ParseGenerateBody(http.body, result.text, result.thinking, parseError);
+        if (cfg.openAiFormat)
+            ParseChatCompletionsBody(http.body, result.text, result.thinking, parseError);
+        else
+            ParseGenerateBody(http.body, result.text, result.thinking, parseError);
 
         if (!parseError.empty())
         {
@@ -229,6 +388,8 @@ void OllamaConfig_Publish()
     next.minP             = g_OllamaMinP;
     next.presencePenalty  = g_OllamaPresencePenalty;
     next.frequencyPenalty = g_OllamaFrequencyPenalty;
+    next.apiKey           = g_ApiKey;
+    next.openAiFormat     = g_OpenAiFormat;
 
     std::lock_guard<std::mutex> lock(g_settingsMutex);
     g_settings = std::move(next);
@@ -270,8 +431,11 @@ OllamaApiResult QueryOllama(const std::string& prompt, OllamaRequestKind kind)
 
         // Ollama would not take a string reasoning level. Drop to the boolean
         // form, remember it for this model, and answer rather than lose this
-        // request.
-        if (!r.ok && !req.level.empty() && r.status >= 400 && r.status < 500)
+        // request. Ollama-format only: in openai format the body never carries
+        // the level, so the retry would repeat a byte-identical request --
+        // notably on a 429, burning paid quota for nothing.
+        if (!cfg.openAiFormat && !r.ok && !req.level.empty() &&
+            r.status >= 400 && r.status < 500)
         {
             OllamaCapability_NoteEffortLevelRejected();
             req.level.clear();
